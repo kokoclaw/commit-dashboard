@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
+import { fetchCommitsLast30Days } from "@/lib/github";
 
-function thirtyDaysAgoISO() {
+function last30DaysKeys(): string[] {
+  const days: string[] = [];
   const d = new Date();
-  d.setDate(d.getDate() - 30);
-  return d.toISOString();
+  for (let i = 29; i >= 0; i--) {
+    const x = new Date(d);
+    x.setDate(d.getDate() - i);
+    days.push(x.toISOString().slice(0, 10));
+  }
+  return days;
 }
 
 export async function GET(req: Request) {
@@ -17,43 +23,40 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Missing GITHUB_TOKEN" }, { status: 500 });
   }
 
-  const since = thirtyDaysAgoISO();
-  const url = `https://api.github.com/repos/${owner}/${repo}/commits?since=${encodeURIComponent(
-    since
-  )}&per_page=100`;
+  try {
+    const commits = await fetchCommitsLast30Days(owner, repo, token);
 
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    cache: "no-store",
-  });
+    const days = last30DaysKeys();
+    const byDay: Record<string, number> = Object.fromEntries(days.map((d) => [d, 0]));
 
-  if (!res.ok) {
-    const text = await res.text();
+    for (const c of commits) {
+      const day = c?.commit?.author?.date?.slice(0, 10);
+      if (!day) continue;
+      if (day in byDay) byDay[day] += 1;
+    }
+
+    let mostActiveDay = { date: days[0], count: byDay[days[0]] };
+    for (const d of days) {
+      if (byDay[d] > mostActiveDay.count) mostActiveDay = { date: d, count: byDay[d] };
+    }
+
+    const totalCommits = commits.length;
+    const avgPerDay = Math.round((totalCommits / 30) * 10) / 10;
+
+    return NextResponse.json({
+      owner,
+      repo,
+      since: days[0],
+      totalCommits,
+      avgPerDay,
+      mostActiveDay,
+      byDay,
+      commitsSample: commits.slice(0, 20),
+    });
+  } catch (e: any) {
     return NextResponse.json(
-      { error: "GitHub API error", status: res.status, details: text },
+      { error: "Failed to fetch commits", details: String(e?.message || e) },
       { status: 500 }
     );
   }
-
-  const commits = await res.json();
-
-  const byDay: Record<string, number> = {};
-  for (const c of commits) {
-    const day = c?.commit?.author?.date?.slice(0, 10);
-    if (!day) continue;
-    byDay[day] = (byDay[day] || 0) + 1;
-  }
-
-  return NextResponse.json({
-    owner,
-    repo,
-    since,
-    total: commits.length,
-    byDay,
-    commits: commits.slice(0, 20),
-  });
 }
